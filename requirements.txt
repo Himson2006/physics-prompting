@@ -1,0 +1,3 @@
+# llama-cpp-python must be installed with CUDA separately; see README step 3.
+huggingface_hub
+ipywidgets
