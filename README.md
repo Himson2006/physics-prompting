@@ -9,7 +9,8 @@ with llama.cpp, on text questions with two fixed prompts.
 - `prompt_regular.ipynb`, `prompt_detailed.ipynb`: textbox UI, one notebook per prompt.
 - `questions.json`: the questions (ID → text), shared by both notebooks and run by their batch cell.
 - `pipeline.py`: model download/loading, generation, and saving. Settings are at the top.
-- `outputs/prompt_regular/`, `outputs/prompt_detailed/`: one `.md` per answer (settings, prompt, question, answer, collapsible reasoning), plus `log.jsonl` with every run.
+- `colab_run.ipynb`: Google Colab notebook that runs both prompts on every question (see `instruction.md`).
+- `outputs/`: one `.md` per answer, named `<question id>_<prompt>.md` (e.g. `Q1_regular.md`, `Q1_detailed.md`; repeats become `Q1_regular_2.md`), plus `log.jsonl` with every run.
 
 ## Server requirements
 - NVIDIA GPU with at least 24 GB free: 18.6 GB for the model plus ~3 GB for a 32k-token context.

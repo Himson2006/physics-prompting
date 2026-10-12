@@ -2,6 +2,8 @@
 
 Model: P1-VL-30B-A3B, Q4_K_M GGUF ([original](https://huggingface.co/PRIME-RL/P1-VL-30B-A3B), [GGUF](https://huggingface.co/mradermacher/P1-VL-30B-A3B-GGUF)). Needs a GPU with ≥ 24 GB free and ~20 GB of disk.
 
+**On Google Colab:** open `colab_run.ipynb` in Colab and follow the steps at its top instead of the server steps below.
+
 ## One-time setup (server)
 1. Check the server in a terminal: `nvidia-smi` (free memory, CUDA version) and `python --version`.
 2. Clone the repo. Log in with your GitHub username and a personal access token (Contents: read and write).
@@ -32,7 +34,7 @@ Run cells one at a time with Shift+Enter. Don't use "Run All", or the last cell 
 3. **Last cell:** set `RUN_IDS` and run it.
    - `["Q1"]` runs a single question; use this for a first test.
    - `None` runs every question in `questions.json`.
-4. Answers print in the notebook and are saved to `outputs/<prompt>/`, one `.md` per run.
+4. Answers print in the notebook and are saved as `outputs/Q1_regular.md`, `outputs/Q1_detailed.md`, etc. Questions that already have a file are skipped; set `SKIP_EXISTING = False` to run them again (saved as `Q1_regular_2.md`).
 5. To switch prompts: shut down this notebook's kernel, open `prompt_detailed.ipynb`, and repeat steps 1–3 with the **same** `SEED` and `RUN_IDS`.
 6. If an answer shows `truncated: True`, set `GEN_KWARGS = {"max_tokens": 28000}` and re-run that question in **both** notebooks.
 

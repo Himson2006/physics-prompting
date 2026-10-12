@@ -1,11 +1,12 @@
 """Shared inference pipeline for P1-VL-30B-A3B (Q4_K_M GGUF) on text-only questions.
 
-Used by prompt_regular.ipynb and prompt_detailed.ipynb. Each notebook loads a fixed prompt
-from prompts/, combines it with a question, runs the model, displays the answer
-and saves a Markdown record to outputs/<prompt_name>/.
+Used by prompt_regular.ipynb, prompt_detailed.ipynb and colab_run.ipynb. A fixed prompt
+from prompts/ is combined with a question, the model answers, and the answer is
+saved as outputs/<question id>_<prompt>.md (e.g. outputs/Q1_regular.md).
 """
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -17,10 +18,13 @@ MODEL_ID = f"{MODEL_REPO}/{MODEL_FILE}"
 
 # Context window = prompt + reasoning + answer. Must exceed max_tokens plus the prompt.
 N_CTX = 32768
+FLASH_ATTN = True
 
 ROOT = Path(__file__).resolve().parent
 PROMPTS_DIR = ROOT / "prompts"
-OUTPUTS_DIR = ROOT / "outputs"
+QUESTIONS_FILE = ROOT / "questions.json"
+# Set PHYSICS_OUTPUTS_DIR (e.g. to a Google Drive folder) to save answers elsewhere.
+OUTPUTS_DIR = Path(os.environ.get("PHYSICS_OUTPUTS_DIR", ROOT / "outputs"))
 
 # Placeholder in a prompt file that gets replaced by the question.
 # If a prompt file has no placeholder, the question is appended after the prompt.
@@ -53,13 +57,24 @@ def load_model():
                 "Reinstall it with CUDA (see README, step 3)."
             )
         print(f"Loading {MODEL_ID} (the first run downloads ~19 GB)...")
-        _llm = llama_cpp.Llama.from_pretrained(
-            repo_id=MODEL_REPO,
-            filename=MODEL_FILE,
-            n_gpu_layers=-1,  # put every layer on the GPU
-            n_ctx=N_CTX,
-            verbose=False,
-        )
+        try:
+            _llm = llama_cpp.Llama.from_pretrained(
+                repo_id=MODEL_REPO,
+                filename=MODEL_FILE,
+                n_gpu_layers=-1,  # put every layer on the GPU
+                n_ctx=N_CTX,
+                # Cuts scratch memory from ~2.2 GiB to ~0.3 GiB, so it fits a 24 GB GPU.
+                flash_attn=FLASH_ATTN,
+                verbose=False,
+            )
+        except ValueError as e:
+            if "llama_context" not in str(e):
+                raise
+            raise RuntimeError(
+                "Not enough free GPU memory (needs ~21 GiB). Restart the kernel/runtime "
+                "to free memory from this failed attempt, then use a bigger GPU or lower "
+                "N_CTX in pipeline.py. See the 'cudaMalloc failed' lines above."
+            ) from e
         print("Model loaded.")
     return _llm
 
@@ -124,7 +139,7 @@ def generate(user_message, gen_kwargs=None, on_token=None, seed=None):
                                        stop=["<|im_end|>"], **kwargs):
         choice = chunk["choices"][0]
         text += choice["text"]
-        n_tokens += 1
+        n_tokens += bool(choice["text"])  # the final "stop" chunk carries no text
         finish = choice.get("finish_reason") or finish
         if on_token is not None:
             on_token(text)
@@ -136,11 +151,25 @@ def _slug(text, n=40):
     return s[:n].strip("-") or "question"
 
 
+def prompt_label(prompt_name):
+    """prompt_regular -> regular, used in output file names."""
+    return prompt_name.removeprefix("prompt_")
+
+
+def output_stem(prompt_name, question_id, question=""):
+    """File name without extension, e.g. Q1_regular."""
+    qid = re.sub(r"[^A-Za-z0-9._-]+", "-", question_id.strip()).strip("-")
+    return f"{qid or _slug(question)}_{prompt_label(prompt_name)}"
+
+
+def result_exists(prompt_name, question_id):
+    return (OUTPUTS_DIR / f"{output_stem(prompt_name, question_id)}.md").exists()
+
+
 def save_markdown(prompt_name, prompt, question, reasoning, answer, meta):
-    out_dir = OUTPUTS_DIR / prompt_name
+    out_dir = OUTPUTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    label = meta.get("question_id") or _slug(question)
-    stem = f"{meta['timestamp'].replace(':', '')}_{_slug(label)}"
+    stem = output_stem(prompt_name, meta.get("question_id", ""), question)
 
     params = "\n".join(f"- **{k}:** {v}" for k, v in meta.items())
     md = (
@@ -153,6 +182,7 @@ def save_markdown(prompt_name, prompt, question, reasoning, answer, meta):
         f"{reasoning}\n\n</details>\n"
     )
     # Every run gets its own file; never overwrite an earlier one.
+    # A repeat of the same question + prompt becomes Q1_regular_2.md, _3, ...
     n = 1
     while True:
         path = out_dir / (f"{stem}.md" if n == 1 else f"{stem}_{n}.md")
@@ -190,6 +220,8 @@ def ask(prompt_name, question, question_id="", gen_kwargs=None, seed=None, on_to
         "prompt_name": prompt_name,
         "model": MODEL_ID,
         "seed": seed,
+        "n_ctx": N_CTX,
+        "flash_attn": FLASH_ATTN,
         "output_tokens": n_tokens,
         "truncated": hit_limit or not answer,
         "seconds": round((datetime.now() - started).total_seconds(), 1),
@@ -235,7 +267,7 @@ def launch_ui(prompt_name, seed=None, gen_kwargs=None):
             live.value = ""
             m = r["meta"]
             status.value = (f"Done in {m['seconds']}s, {m['output_tokens']} tokens. "
-                            f"Saved to <code>{r['path'].relative_to(ROOT)}</code>")
+                            f"Saved to <code>{r['path']}</code>")
             with result:
                 display(Markdown("### Answer\n\n" + (r["answer"] or
                         "_No final answer — hit max_tokens. See reasoning in the saved file._")))
@@ -250,3 +282,55 @@ def launch_ui(prompt_name, seed=None, gen_kwargs=None):
                f"<pre style='white-space:pre-wrap;max-height:120px;overflow:auto'>{html.escape(prompt)}</pre>"),
         qid, question, run, status, live, result,
     ]))
+
+
+def load_questions():
+    return json.loads(QUESTIONS_FILE.read_text(encoding="utf-8"))
+
+
+def run_batch(prompt_names, question_ids=None, seed=None, gen_kwargs=None, skip_existing=True):
+    """Answer questions from questions.json with each prompt.
+
+    Goes question by question (Q1 regular, Q1 detailed, Q2 regular, ...) so an
+    interrupted run leaves complete pairs. With skip_existing, any question +
+    prompt that already has a saved file (e.g. Q1_regular.md) is skipped, so
+    re-running after a disconnect continues where it stopped.
+    """
+    import time
+
+    from IPython.display import Markdown, display
+
+    questions = load_questions()
+    ids = list(questions) if question_ids is None else list(question_ids)
+    missing = [i for i in ids if i not in questions]
+    if missing:
+        raise ValueError(f"Not in questions.json: {missing}")
+    for name in prompt_names:
+        load_prompt(name)  # fail early on a bad prompt name
+    load_model()
+
+    jobs = [(qid, name) for qid in ids for name in prompt_names]
+    print(f"Saving to {OUTPUTS_DIR}")
+    for i, (qid, name) in enumerate(jobs, 1):
+        tag = f"[{i}/{len(jobs)}] {output_stem(name, qid)}"
+        if skip_existing and result_exists(name, qid):
+            print(f"{tag}: already done, skipping")
+            continue
+        progress = display(Markdown(f"**{tag}**: starting..."), display_id=True)
+        state = {"n": 0, "t0": time.time(), "last": 0.0}
+
+        def on_token(_text, tag=tag, progress=progress, state=state):
+            state["n"] += 1
+            now = time.time()
+            if now - state["last"] > 2:
+                state["last"] = now
+                progress.update(Markdown(
+                    f"**{tag}**: generating... {state['n']} tokens, {now - state['t0']:.0f}s"))
+
+        r = ask(name, questions[qid], qid, gen_kwargs, seed, on_token)
+        m = r["meta"]
+        flag = " ⚠️ TRUNCATED" if m["truncated"] else ""
+        progress.update(Markdown(
+            f"**{tag}**: done in {m['seconds']}s, {m['output_tokens']} tokens{flag} → `{r['path'].name}`\n\n"
+            + (r["answer"] or "_No final answer (hit max_tokens)._")))
+    print("All done.")
