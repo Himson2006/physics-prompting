@@ -1,8 +1,10 @@
 """Shared inference pipeline for P1-VL-30B-A3B (Q4_K_M GGUF) on text-only questions.
 
-Used by prompt_regular.ipynb, prompt_detailed.ipynb and colab_run.ipynb. A fixed prompt
-from prompts/ is combined with a question, the model answers, and the answer is
-saved as outputs/<question id>_<prompt>.md (e.g. outputs/Q1_regular.md).
+Used by prompt_regular.ipynb, prompt_detailed.ipynb and colab_run.ipynb. Questions come
+from three sets (regular_questions.json, obvious_questions.json,
+non_obvious_questions.json). A fixed prompt from prompts/ is combined with a
+question, the model answers, and the answer is saved as
+outputs/Q<n>_<set>_<prompt>.md (e.g. outputs/Q1_obvious_detailed_prompt.md).
 """
 
 import json
@@ -22,7 +24,13 @@ FLASH_ATTN = True
 
 ROOT = Path(__file__).resolve().parent
 PROMPTS_DIR = ROOT / "prompts"
-QUESTIONS_FILE = ROOT / "questions.json"
+
+# Question sets, each stored in <set>_questions.json, and the prompts applied to each.
+QUESTION_SETS = {
+    "regular": ["prompt_regular"],
+    "obvious": ["prompt_regular", "prompt_detailed"],
+    "non_obvious": ["prompt_regular", "prompt_detailed"],
+}
 # Set PHYSICS_OUTPUTS_DIR (e.g. to a Google Drive folder) to save answers elsewhere.
 OUTPUTS_DIR = Path(os.environ.get("PHYSICS_OUTPUTS_DIR", ROOT / "outputs"))
 
@@ -43,6 +51,21 @@ DEFAULT_GEN_KWARGS = {
 }
 
 _llm = None
+_gpu_name = None
+
+
+def gpu_name():
+    """Name of the GPU, recorded with each answer (e.g. 'NVIDIA A100-SXM4-40GB')."""
+    global _gpu_name
+    if _gpu_name is None:
+        import subprocess
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            _gpu_name = out.strip().splitlines()[0] if out.strip() else "unknown"
+        except (OSError, subprocess.SubprocessError):
+            _gpu_name = "unknown"
+    return _gpu_name
 
 
 def load_model():
@@ -152,28 +175,30 @@ def _slug(text, n=40):
 
 
 def prompt_label(prompt_name):
-    """prompt_regular -> regular, used in output file names."""
-    return prompt_name.removeprefix("prompt_")
+    """prompt_regular -> regular_prompt, used in output file names."""
+    return f"{prompt_name.removeprefix('prompt_')}_prompt"
 
 
-def output_stem(prompt_name, question_id, question=""):
-    """File name without extension, e.g. Q1_regular."""
+def output_stem(prompt_name, question_set, question_id, question=""):
+    """File name without extension, e.g. Q1_obvious_detailed_prompt."""
     qid = re.sub(r"[^A-Za-z0-9._-]+", "-", question_id.strip()).strip("-")
-    return f"{qid or _slug(question)}_{prompt_label(prompt_name)}"
+    parts = [qid or _slug(question), question_set, prompt_label(prompt_name)]
+    return "_".join(x for x in parts if x)
 
 
-def result_exists(prompt_name, question_id):
-    return (OUTPUTS_DIR / f"{output_stem(prompt_name, question_id)}.md").exists()
+def result_exists(prompt_name, question_set, question_id):
+    stem = output_stem(prompt_name, question_set, question_id)
+    return (OUTPUTS_DIR / f"{stem}.md").exists()
 
 
 def save_markdown(prompt_name, prompt, question, reasoning, answer, meta):
     out_dir = OUTPUTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = output_stem(prompt_name, meta.get("question_id", ""), question)
+    stem = output_stem(prompt_name, meta["question_set"], meta["question_id"], question)
 
     params = "\n".join(f"- **{k}:** {v}" for k, v in meta.items())
     md = (
-        f"# {prompt_name} — {meta.get('question_id') or 'Question'}\n\n"
+        f"# {stem}\n\n"
         f"{params}\n\n"
         f"## Prompt\n\n````\n{prompt}\n````\n\n"
         f"## Question\n\n{question}\n\n"
@@ -182,30 +207,41 @@ def save_markdown(prompt_name, prompt, question, reasoning, answer, meta):
         f"{reasoning}\n\n</details>\n"
     )
     # Every run gets its own file; never overwrite an earlier one.
-    # A repeat of the same question + prompt becomes Q1_regular_2.md, _3, ...
+    # A repeat becomes Q1_obvious_regular_prompt_2.md, _3, ...
     n = 1
-    while True:
-        path = out_dir / (f"{stem}.md" if n == 1 else f"{stem}_{n}.md")
-        try:
-            with open(path, "x", encoding="utf-8") as f:
-                f.write(md)
-            break
-        except FileExistsError:
-            n += 1
+    while (path := out_dir / (f"{stem}.md" if n == 1 else f"{stem}_{n}.md")).exists():
+        n += 1
+
+    # Write to a hidden temporary file first and rename it at the end, so a
+    # session that dies mid-write never leaves a half-written Q1_regular.md
+    # that a resumed run would mistake for a finished answer.
+    tmp = out_dir / f".{path.name}.partial"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(md)
+        f.flush()
+        os.fsync(f.fileno())
 
     # Also append to a JSONL log so all runs are easy to analyse together.
-    record = {**meta, "prompt": prompt, "question": question,
+    record = {**meta, "file": path.name, "prompt": prompt, "question": question,
               "answer": answer, "reasoning": reasoning}
     with open(out_dir / "log.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    os.replace(tmp, path)  # the .md file appearing is what marks this run as done
     return path
 
 
-def ask(prompt_name, question, question_id="", gen_kwargs=None, seed=None, on_token=None):
+def ask(prompt_name, question, question_id="", question_set="", gen_kwargs=None, seed=None,
+        on_token=None):
     """Full pipeline: prompt + question -> model -> saved Markdown file."""
     question = question.strip()
     if not question:
         raise ValueError("Question is empty.")
+    if question_set:
+        check_set(question_set)
+        if prompt_name not in QUESTION_SETS[question_set]:
+            raise ValueError(f"{prompt_name} is not applied to the '{question_set}' set "
+                             f"(allowed: {QUESTION_SETS[question_set]}).")
     prompt = load_prompt(prompt_name)
     kwargs = {**DEFAULT_GEN_KWARGS, **(gen_kwargs or {})}
 
@@ -217,11 +253,13 @@ def ask(prompt_name, question, question_id="", gen_kwargs=None, seed=None, on_to
     meta = {
         "timestamp": started.strftime("%Y-%m-%dT%H:%M:%S"),
         "question_id": question_id.strip(),
+        "question_set": question_set,
         "prompt_name": prompt_name,
         "model": MODEL_ID,
         "seed": seed,
         "n_ctx": N_CTX,
         "flash_attn": FLASH_ATTN,
+        "gpu": gpu_name(),
         "output_tokens": n_tokens,
         "truncated": hit_limit or not answer,
         "seconds": round((datetime.now() - started).total_seconds(), 1),
@@ -242,6 +280,9 @@ def launch_ui(prompt_name, seed=None, gen_kwargs=None):
     prompt = load_prompt(prompt_name)
     load_model()
 
+    sets = [k for k, v in QUESTION_SETS.items() if prompt_name in v]
+    qset = w.Dropdown(options=sets, description="Question set:",
+                      style={"description_width": "initial"})
     qid = w.Text(placeholder="optional, e.g. Q1", description="Question ID:",
                  layout=w.Layout(width="400px"))
     question = w.Textarea(placeholder="Paste the question here...",
@@ -263,7 +304,8 @@ def launch_ui(prompt_name, seed=None, gen_kwargs=None):
                 live.value = f"<pre style='white-space:pre-wrap'>{html.escape(text[-4000:])}</pre>"
 
         try:
-            r = ask(prompt_name, question.value, qid.value, gen_kwargs, seed, on_token)
+            r = ask(prompt_name, question.value, qid.value, qset.value,
+                    gen_kwargs=gen_kwargs, seed=seed, on_token=on_token)
             live.value = ""
             m = r["meta"]
             status.value = (f"Done in {m['seconds']}s, {m['output_tokens']} tokens. "
@@ -280,40 +322,62 @@ def launch_ui(prompt_name, seed=None, gen_kwargs=None):
     display(w.VBox([
         w.HTML(f"<b>Prompt:</b> <code>prompts/{prompt_name}.md</code>"
                f"<pre style='white-space:pre-wrap;max-height:120px;overflow:auto'>{html.escape(prompt)}</pre>"),
-        qid, question, run, status, live, result,
+        qset, qid, question, run, status, live, result,
     ]))
 
 
-def load_questions():
-    return json.loads(QUESTIONS_FILE.read_text(encoding="utf-8"))
+def check_set(question_set):
+    if question_set not in QUESTION_SETS:
+        raise ValueError(f"Unknown question set '{question_set}'. Use one of {list(QUESTION_SETS)}.")
 
 
-def run_batch(prompt_names, question_ids=None, seed=None, gen_kwargs=None, skip_existing=True):
-    """Answer questions from questions.json with each prompt.
+def questions_file(question_set):
+    return ROOT / f"{question_set}_questions.json"
 
-    Goes question by question (Q1 regular, Q1 detailed, Q2 regular, ...) so an
-    interrupted run leaves complete pairs. With skip_existing, any question +
-    prompt that already has a saved file (e.g. Q1_regular.md) is skipped, so
-    re-running after a disconnect continues where it stopped.
+
+def load_questions(question_set):
+    check_set(question_set)
+    return json.loads(questions_file(question_set).read_text(encoding="utf-8"))
+
+
+def run_batch(question_sets=None, question_ids=None, prompt_names=None, seed=None,
+              gen_kwargs=None, skip_existing=True):
+    """Answer questions from the question files with the prompts each set uses.
+
+    question_sets: e.g. ["obvious"]; None = all sets.
+    question_ids: e.g. ["Q1", "Q2"], applied within each set; None = all.
+    prompt_names: limit to these prompts (e.g. ["prompt_detailed"]); None = every
+        prompt the set uses (see QUESTION_SETS).
+
+    Goes question by question (Q1 regular prompt, Q1 detailed prompt, Q2 ...) so
+    an interrupted run leaves complete pairs. With skip_existing, any answer that
+    already has a saved file is skipped, so re-running after a disconnect
+    continues where it stopped.
     """
     import time
 
     from IPython.display import Markdown, display
 
-    questions = load_questions()
-    ids = list(questions) if question_ids is None else list(question_ids)
-    missing = [i for i in ids if i not in questions]
-    if missing:
-        raise ValueError(f"Not in questions.json: {missing}")
-    for name in prompt_names:
-        load_prompt(name)  # fail early on a bad prompt name
+    sets = list(QUESTION_SETS) if question_sets is None else list(question_sets)
+    jobs = []
+    for qs in sets:
+        questions = load_questions(qs)
+        ids = list(questions) if question_ids is None else list(question_ids)
+        missing = [i for i in ids if i not in questions]
+        if missing:
+            raise ValueError(f"Not in {questions_file(qs).name}: {missing}")
+        prompts = [p for p in QUESTION_SETS[qs] if prompt_names is None or p in prompt_names]
+        if not prompts:
+            print(f"Note: no selected prompt is applied to the '{qs}' set; skipping it.")
+        jobs += [(qs, qid, questions[qid], p) for qid in ids for p in prompts]
+    for name in {p for *_, p in jobs}:
+        load_prompt(name)  # fail early on a missing prompt file
     load_model()
 
-    jobs = [(qid, name) for qid in ids for name in prompt_names]
     print(f"Saving to {OUTPUTS_DIR}")
-    for i, (qid, name) in enumerate(jobs, 1):
-        tag = f"[{i}/{len(jobs)}] {output_stem(name, qid)}"
-        if skip_existing and result_exists(name, qid):
+    for i, (qs, qid, question, name) in enumerate(jobs, 1):
+        tag = f"[{i}/{len(jobs)}] {output_stem(name, qs, qid)}"
+        if skip_existing and result_exists(name, qs, qid):
             print(f"{tag}: already done, skipping")
             continue
         progress = display(Markdown(f"**{tag}**: starting..."), display_id=True)
@@ -327,7 +391,7 @@ def run_batch(prompt_names, question_ids=None, seed=None, gen_kwargs=None, skip_
                 progress.update(Markdown(
                     f"**{tag}**: generating... {state['n']} tokens, {now - state['t0']:.0f}s"))
 
-        r = ask(name, questions[qid], qid, gen_kwargs, seed, on_token)
+        r = ask(name, question, qid, qs, gen_kwargs=gen_kwargs, seed=seed, on_token=on_token)
         m = r["meta"]
         flag = " ⚠️ TRUNCATED" if m["truncated"] else ""
         progress.update(Markdown(

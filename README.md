@@ -7,10 +7,10 @@ with llama.cpp, on text questions with two fixed prompts.
 ## Files
 - `prompts/prompt_regular.md`, `prompts/prompt_detailed.md`: the two fixed prompts. Put `{question}` where the question goes. Without it, the question is appended at the end.
 - `prompt_regular.ipynb`, `prompt_detailed.ipynb`: textbox UI, one notebook per prompt.
-- `questions.json`: the questions (ID → text), shared by both notebooks and run by their batch cell.
+- `regular_questions.json`, `obvious_questions.json`, `non_obvious_questions.json`: the three question sets (ID → text). The regular set gets only the regular prompt; the other two get both prompts. Set → prompts mapping: `QUESTION_SETS` in `pipeline.py`.
 - `pipeline.py`: model download/loading, generation, and saving. Settings are at the top.
 - `colab_run.ipynb`: Google Colab notebook that runs both prompts on every question (see `instruction.md`).
-- `outputs/`: one `.md` per answer, named `<question id>_<prompt>.md` (e.g. `Q1_regular.md`, `Q1_detailed.md`; repeats become `Q1_regular_2.md`), plus `log.jsonl` with every run.
+- `outputs/`: one `.md` per answer, named `Q<n>_<set>_<prompt>.md` (e.g. `Q1_regular_regular_prompt.md`, `Q1_obvious_detailed_prompt.md`, `Q2_non_obvious_regular_prompt.md`; repeats get `_2`, `_3`), plus `log.jsonl` with every run.
 
 ## Server requirements
 - NVIDIA GPU with at least 24 GB free: 18.6 GB for the model plus ~3 GB for a 32k-token context.

@@ -31,11 +31,12 @@ Run cells one at a time with Shift+Enter. Don't use "Run All", or the last cell 
 
 1. **GPU check cell:** must print `GPU: True`.
 2. **Settings cell:** set `SEED = 0` and run it. The first time, it downloads the model (~19 GB).
-3. **Last cell:** set `RUN_IDS` and run it.
-   - `["Q1"]` runs a single question; use this for a first test.
-   - `None` runs every question in `questions.json`.
-4. Answers print in the notebook and are saved as `outputs/Q1_regular.md`, `outputs/Q1_detailed.md`, etc. Questions that already have a file are skipped; set `SKIP_EXISTING = False` to run them again (saved as `Q1_regular_2.md`).
-5. To switch prompts: shut down this notebook's kernel, open `prompt_detailed.ipynb`, and repeat steps 1–3 with the **same** `SEED` and `RUN_IDS`.
+3. **Last cell:** set `RUN_SETS` and `RUN_IDS` and run it.
+   - `RUN_SETS`: `None` = every set this prompt applies to, or e.g. `["obvious"]`.
+   - `RUN_IDS`: `None` = every question, or e.g. `["Q1"]` for a first test.
+   - The regular prompt runs on all three sets; the detailed prompt only on `obvious` and `non_obvious`.
+4. Answers print in the notebook and are saved as `outputs/Q<n>_<set>_<prompt>.md`, e.g. `Q1_obvious_detailed_prompt.md`. Answers that already have a file are skipped; set `SKIP_EXISTING = False` to run them again (saved with `_2`).
+5. To switch prompts: shut down this notebook's kernel, open `prompt_detailed.ipynb`, and repeat steps 1–3 with the **same** `SEED`.
 6. If an answer shows `truncated: True`, set `GEN_KWARGS = {"max_tokens": 28000}` and re-run that question in **both** notebooks.
 
 ## Save results
@@ -47,7 +48,7 @@ Then run `git pull` on your Mac.
 
 ## Adding questions
 On your Mac:
-1. Add the questions to `questions.json` with **new** IDs.
+1. Add the questions to the right file (`regular_questions.json`, `obvious_questions.json` or `non_obvious_questions.json`) with **new** IDs.
 2. Double every LaTeX backslash (`$\\theta$`).
 3. Push to GitHub.
 
@@ -56,5 +57,5 @@ On the server, `git pull`, then set `RUN_IDS` to just the new IDs. Never edit or
 ## Troubleshooting
 - **`GPU: False` or very slow:** reinstall llama-cpp-python using the build-from-source option.
 - **Kernel dies while loading:** not enough free GPU memory. Shut down other notebooks or jobs.
-- **`Not in questions.json`:** typo in `RUN_IDS`, or you haven't pulled the new questions yet.
+- **`Not in obvious_questions.json` (etc.):** typo in `RUN_IDS`, that set doesn't have that question, or you haven't pulled the new questions yet.
 - **`exceeds N_CTX`:** keep `max_tokens` ≤ 30000.

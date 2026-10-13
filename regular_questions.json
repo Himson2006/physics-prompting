@@ -1,0 +1,5 @@
+{
+  "Q1": "A block of mass (m) = 12 kg slides down from rest in an inclined plane. The plane is at a constant angle (θ) of 30$^o$ with respect to the horizontal. The coefficient of kinetic friction (μk) between the mass and the plane is 0.5. The acceleration due to gravity in the location is 10 m/s$^2$. The block slides down a total distance of 5 meters before it touches the ground. What is the total time taken by the block to travel the 5 meters?",
+  "Q2": "A simple pendulum has a solid sphere of mass (m) 2kg and a string of negligible mass. The distance between the point of support and the center of the spherical mass is L = 2 meters, and the radius of the solid sphere is (L/2)=1 meter. The acceleration due to gravity is 10 m/s$^2$ at the location. Find the time period of this pendulum for small displacements." ,
+  "Q3": "A solid sphere (a rigid body) of mass (m) 2kg, released from rest on an inclined plane at a height (h) of 7 meters and rolls without slipping. Calculate the velocity of the solid sphere at the bottom of the plane using conservation of energy. The acceleration due to gravity (g) at the location is 10 m/s$^2$."
+}
